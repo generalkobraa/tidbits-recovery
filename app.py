@@ -1,50 +1,59 @@
 import os
 import stripe
-import resend  # You will need to install this: pip install resend
+import resend
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# Configure API Keys
+# Configure API Keys from environment variables
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
 resend.api_key = os.getenv('RESEND_API_KEY')
 
 def send_receipt_email(customer_email, intent_id, status):
-    """Sends a receipt or failure notice to the customer."""
+    """Sends a professional receipt or failure notice to the customer."""
     subject = "Payment Update regarding your Tidbits purchase" if status == "failed" else "Your Tidbits Receipt"
-    html_content = f"<p>Your payment {intent_id} has <b>{status}</b>.</p>"
+    html_content = f"<p>Your payment <b>{intent_id}</b> has <b>{status}</b>.</p>"
     
-    resend.Emails.send({
-        "from": "noreply@yourdomain.com", # Change to your verified domain
-        "to": customer_email,
-        "subject": subject,
-        "html": html_content
-    })
+    try:
+        resend.Emails.send({
+            "from": "noreply@yourdomain.com", # Ensure this domain is verified in Resend
+            "to": customer_email,
+            "subject": subject,
+            "html": html_content
+        })
+    except Exception as e:
+        print(f"Failed to send email: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    # Capture raw payload for signature verification
     payload = request.data
     sig_header = request.headers.get('Stripe-Signature')
 
     try:
+        # Verify the signature
         event = stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
-    except Exception:
-        return jsonify({'error': 'Invalid request'}), 400
+    except ValueError:
+        return jsonify({'error': 'Invalid payload'}), 400
+    except stripe.error.SignatureVerificationError:
+        return jsonify({'error': 'Invalid signature'}), 400
 
-    # Event 1: Payment Failed
-    if event['type'] == 'payment_intent.payment_failed':
-        payment_intent = event['data']['object']
-        customer_email = payment_intent.get('receipt_email') or "customer@example.com"
-        send_receipt_email(customer_email, payment_intent['id'], "failed")
-        print(f"Failed payment email sent to {customer_email}")
+    # Handle Events
+    # Stripe objects use dot notation (e.g., event.data.object.id)
+    payment_intent = event.data.object
 
-    # Event 2: Payment Succeeded (The Receipt)
-    elif event['type'] == 'payment_intent.succeeded':
-        payment_intent = event['data']['object']
-        customer_email = payment_intent.get('receipt_email') or "customer@example.com"
-        send_receipt_email(customer_email, payment_intent['id'], "succeeded")
-        print(f"Success receipt email sent to {customer_email}")
+    if event.type == 'payment_intent.payment_failed':
+        # Safely get receipt_email; default to a fallback
+        customer_email = getattr(payment_intent, 'receipt_email', "customer@example.com")
+        send_receipt_email(customer_email, payment_intent.id, "failed")
+        print(f"Failed payment handled for {payment_intent.id}")
+
+    elif event.type == 'payment_intent.succeeded':
+        # Safely get receipt_email; default to a fallback
+        customer_email = getattr(payment_intent, 'receipt_email', "customer@example.com")
+        send_receipt_email(customer_email, payment_intent.id, "succeeded")
+        print(f"Success receipt handled for {payment_intent.id}")
 
     return jsonify(success=True), 200
 
